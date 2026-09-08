@@ -50,6 +50,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    services:
+      # S10. The rate limiter's Redis backend is the one part of this repo that
+      # cannot be verified on the development machine — it has no Docker, no
+      # redis-server and no WSL distribution — so the runner is where that
+      # claim gets tested. A fake with partial Lua support was rejected: the
+      # property under test is that the check and the spend are atomic INSIDE
+      # Redis, which only a real server demonstrates.
+      #
+      # Matches the tag the compose stack runs, so the Lua script is exercised
+      # against the same engine production uses.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -76,6 +96,31 @@ jobs:
         # auth tests exercise the open-API path, and CELERY_BROKER_URL is unset
         # so Celery runs eagerly in-process — no Redis service needed.
         run: python -m pytest -q
+
+      - name: Redis-backed rate limiter
+        # A SEPARATE step, deliberately. The run above sets no env so that every
+        # optional integration is exercised in its off state, and that includes
+        # the rate limiter's in-process path. This step is the only place
+        # REDIS_URL is set, so the two stores are both covered rather than one
+        # silently replacing the other.
+        #
+        # test_rate_limit_redis.py SKIPS ITSELF when REDIS_URL is unset, and an
+        # all-skipped run exits 0. So the exit code alone cannot distinguish
+        # "the Redis limiter works" from "nothing ran" — the second is what you
+        # get the day this env block is edited away. The grep asserts a nonzero
+        # passed count, turning a silently empty run into a red build.
+        shell: bash
+        env:
+          # db 15, not 0: the compose stack uses 0 and 1 for the Celery broker
+          # and result backend. Nothing shares this database with real data.
+          REDIS_URL: redis://localhost:6379/15
+        run: |
+          set -o pipefail
+          python -m pytest backend/tests/test_rate_limit_redis.py -q | tee "$RUNNER_TEMP/redis-tests.log"
+          grep -qE '[0-9]+ passed' "$RUNNER_TEMP/redis-tests.log" || {
+            echo "::error::Redis limiter tests did not run — REDIS_URL missing or all tests skipped"
+            exit 1
+          }
 
       - name: Detector regression gate
         # Exits non-zero if any finding type regresses below its recorded

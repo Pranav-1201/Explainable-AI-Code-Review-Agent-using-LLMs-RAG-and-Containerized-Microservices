@@ -52,6 +52,13 @@ tree-sitter-typescript>=0.23
 # in-process, so the API and test suite work without a broker installed.
 celery[redis]>=5.3,<6
 
+# Declared directly, not left to celery's [redis] extra, because api_guard's
+# rate limiter now imports redis itself (S10 — backend/app/rate_limit_store.py).
+# Relying on someone else's extra means the import silently depends on Celery
+# keeping that extra forever; an install that resolved differently would fail
+# at request time rather than at install time.
+redis>=5,<7
+
 # ==========================================================
 # Environment
 # ==========================================================

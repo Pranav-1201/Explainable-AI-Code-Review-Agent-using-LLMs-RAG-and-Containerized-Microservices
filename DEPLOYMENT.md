@@ -216,6 +216,7 @@ doors, which is why neither ships by default.
 | `ALLOWED_ORIGINS` | ✅ | — | Comma-separated CORS origins. Default: localhost dev ports. Never `*`. |
 | `ALLOWED_GIT_HOSTS` | ✅ | — | Comma-separated cloneable hosts. Setting it **replaces** the defaults (github/gitlab/bitbucket). |
 | `RATE_LIMIT_PER_MINUTE` | ✅ | — | Per client, per route. Default 60. |
+| `REDIS_URL` | ✅ | — | Shares the rate-limit window across API replicas. **Unset ⇒ per-replica limiting.** Point it at the broker the stack already runs, on its own database: `redis://redis:6379/2`. Worker serves no HTTP, so it needs none. |
 
 Full annotated list, including the frontend and LLM variables: **`.env.example`**.
 
@@ -317,12 +318,24 @@ GHCR rejects uppercase paths and this repository's owner has capitals.
 - **SQLite on a shared volume** is fine on a single host (WAL is enabled), but is
   not a multi-host answer. Postgres is the path if the API and worker ever run on
   different hosts.
-- **Rate limiting is in-process.** The counter lives in the API container's
-  memory, which is exactly accurate for the single-API-container deployment this
-  compose file describes. Scale the **api** service to N replicas and the
-  effective limit silently becomes N × `RATE_LIMIT_PER_MINUTE`, because each
-  replica counts only its own traffic. Moving to a shared Redis counter is the
-  prerequisite for scaling the API — the broker is already there.
+- **Rate limiting is in-process unless `REDIS_URL` is set** (S10). Left unset,
+  the counter lives in the API container's memory — exactly accurate for the
+  single-API-container deployment this compose file describes, and silently
+  N × `RATE_LIMIT_PER_MINUTE` if you scale **api** to N replicas, because each
+  replica counts only its own traffic. Set `REDIS_URL` to the broker the stack
+  already runs and the window moves into Redis, shared by every replica, which
+  is the prerequisite for scaling the API.
+
+  Check which one is live rather than assuming: `GET /health` reports
+  `"rate_limit": "redis"` or `"in-process"`. It **pings** Redis rather than
+  merely checking that a client was constructed, so `in-process` on a
+  deployment where you set `REDIS_URL` means Redis is genuinely unreachable.
+
+  If Redis fails, the limiter degrades to the in-process window rather than
+  failing open (which would delete the control during an incident) or failing
+  closed (which would turn a broker hiccup into a total outage). It logs one
+  warning per outage and stops retrying for 30s, so a dead Redis does not add
+  a connect timeout to every request. See DECISIONS.md D34.
 - **The API key is a single shared secret**, not per-user auth, and the frontend
   copy ships inside a public static bundle. It raises the cost of drive-by abuse
   of `/scan`; it does not identify or isolate callers. A login + short-lived

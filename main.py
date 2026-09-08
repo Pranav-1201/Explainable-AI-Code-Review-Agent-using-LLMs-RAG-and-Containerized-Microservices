@@ -395,6 +395,9 @@ def health():
         "database": database,
         "queue": "eager" if celery_app.conf.task_always_eager else "broker",
         "auth": "enabled" if api_guard.auth_enabled() else "disabled",
+        # "in-process" on a multi-replica deployment means the limit is being
+        # applied N times over. That is invisible without this field.
+        "rate_limit": api_guard.rate_limit_backend(),
     }
 
 

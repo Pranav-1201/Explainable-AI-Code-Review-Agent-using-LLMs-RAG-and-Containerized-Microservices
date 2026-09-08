@@ -44,6 +44,11 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.delenv("API_KEY", raising=False)
     monkeypatch.delenv("RATE_LIMIT_PER_MINUTE", raising=False)
+    # S10: the limiter now has a Redis backend. These tests assert the limiting
+    # POLICY, not the store, so pin them to the in-process one — otherwise a
+    # developer with REDIS_URL exported would silently run them against a
+    # shared server and see counts left over from another process.
+    monkeypatch.delenv("REDIS_URL", raising=False)
     api_guard.reset_rate_limiter()
 
     original = connection.DB_PATH
@@ -323,6 +328,10 @@ def test_health_reports_component_status(client):
     # rather than claimed as a healthy broker.
     assert body["queue"] == "eager"
     assert body["auth"] == "disabled"
+    # S10: which store is actually serving the rate limit. "in-process" on a
+    # multi-replica deployment means the budget is being granted N times over,
+    # and that is otherwise invisible to an operator.
+    assert body["rate_limit"] == "in-process"
 
 
 def test_health_reports_auth_enabled_when_key_set(client, monkeypatch):
