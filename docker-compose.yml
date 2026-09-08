@@ -35,6 +35,12 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       ALLOWED_GIT_HOSTS: ${ALLOWED_GIT_HOSTS:-}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-}
+      # Unset -> the rate-limit window stays in this process, which is exactly
+      # as accurate on one container and N times too generous across N. Set it
+      # to share the window (redis://redis:6379/2 — its own database; 0 and 1
+      # belong to Celery). The prod overlay declares no environment block of
+      # its own for api, so this line serves both compose paths.
+      REDIS_URL: ${REDIS_URL:-}
     volumes:
       - scan-data:/data
     depends_on:
