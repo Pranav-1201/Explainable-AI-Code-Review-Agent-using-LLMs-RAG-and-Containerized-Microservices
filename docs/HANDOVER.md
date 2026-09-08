@@ -4,11 +4,22 @@
 short as *"finish my project"*, this file is the whole brief. Read it, then
 `docs/CONSTRAINTS.md`, then start at the next unfinished phase below.
 
-**Last updated:** 2026-09-05 · **Updated by:** Claude Opus 5 session
-`81d7c85b` · **Branch at handover:** `main` — **pushed**, **CI GREEN** on the
-merge commit `fb29705` (run `33968513343`, all 3 jobs).
-**B1 is complete** — section 1c. Phases L and K are complete, F1 is complete,
-and the unassigned backlog is now closed except S10. See sections 1a–1c.
+**Last updated:** 2026-09-08 · **Updated by:** Claude Opus 5 session
+`9b583d0e` · **Branch at handover:** `s10/redis-rate-limiting` — **pushed**,
+**CI GREEN** (run `34263975530`, all 3 jobs), **3 commits, NOT MERGED**.
+`main` is unchanged at `5fa6b6e`.
+**S10 is complete** — section 1d. B1 is complete (1c); phases L and K are
+complete and F1 is complete (1a–1b). **The unassigned backlog is now empty.**
+The only thing left in the roadmap is **M — deploy**.
+
+> **Read this before touching CI on a new branch.** `s10/redis-rate-limiting`
+> got **no CI run at all** when it was pushed, silently. `ci.yml` triggers on
+> `branches: ["main", "phase-*/**", "prelaunch/**"]` and nothing else, so a
+> branch outside those families pushes successfully and runs nothing. The
+> workflow's own comment warns about this and it still cost a step. It was run
+> via `gh workflow run CI --ref <branch>` (`workflow_dispatch` is enabled).
+> Either dispatch manually, open a PR to `main`, or name the branch to match a
+> family — but do not read a clean `git push` as a green build.
 
 > **J1 is COMPLETE, reviewed and MERGED into `main` at `37f0060`.** Branch
 > deleted. `main` = `origin/main` = `e857e0e`, and **CI is green on it** (run
@@ -62,8 +73,8 @@ and the unassigned backlog is now closed except S10. See sections 1a–1c.
 > **Phase K is DONE** — B6, F10. **F1 is DONE** — light mode, closing Phase I.
 > **Backlog B2, B3, B4, B5 and F3 are DONE.** All unpushed. Sections 1a, 1b.
 >
-> **B1 is DONE (2026-09-05)** — section 1c. **What is left: S10** (Redis rate
-> limiting) and **Phase M** (deploy). Nothing else in the audit is open.
+> **B1 is DONE (2026-09-05)** — section 1c. **S10 is DONE (2026-09-08)** —
+> section 1d. **What is left: Phase M** (deploy). Nothing else is open.
 
 ---
 
@@ -381,6 +392,77 @@ section 3 sets for feature work.
 
 ---
 
+## 1d. S10 — Redis rate limiting, done 2026-09-08
+
+Branch `s10/redis-rate-limiting`, 3 commits, **pushed, CI green (run
+`34263975530`, all 3 jobs), NOT merged.** `main` is untouched at `5fa6b6e`.
+
+The limiter kept its window in a process-local dict, so each API replica
+granted the full budget and the effective limit was N x
+`RATE_LIMIT_PER_MINUTE`. Exact on one container, silently wrong the moment
+`api` is scaled — which is why this was deploy-adjacent rather than optional.
+
+| Commit | What landed |
+|---|---|
+| `b9b4ffa` | `backend/app/rate_limit_store.py` (in-process + Redis stores), `api_guard` delegates storage and keeps policy, `/health` reports the live store, 19 tests, `redis` declared directly |
+| `d0e4c21` | `redis:7-alpine` service on the CI backend job + a guarded step that runs the Redis tests |
+| `29a74f9` | `DEPLOYMENT.md`, `DECISIONS.md` D34, `.env.example` |
+
+`check_rate_limit`'s signature did not change, so neither call site
+(`main.py` `/scan` and `/feedback`) moved and the three pre-existing
+rate-limit tests were not touched. `REDIS_URL` unset keeps the exact previous
+behaviour; set, the window moves into the Redis already running for Celery.
+
+**Design points worth not re-litigating** (full reasoning in `DECISIONS.md`
+D34): one Lua `EVAL`, not a pipeline, because a read-then-write lets two
+replicas both observe `count < limit`; a sorted set, not `INCR`/`EXPIRE`,
+because a fixed window double-bursts across the boundary and cannot give a
+true `Retry-After`; Redis `TIME`, not `time.monotonic()`, because monotonic
+clocks have no shared origin across processes; a unique member per hit,
+because a ZSET is a set and two hits in one millisecond would collapse.
+
+A Redis failure **degrades to the in-process window** — not fail-open, which
+would delete the control during the incident where shedding load matters, and
+not fail-closed, which would make a broker hiccup a total outage.
+
+### Measured, every command run fresh that session
+
+| Check | Result |
+|---|---|
+| `venv/Scripts/python.exe -m pytest` before any change | **517 passed, 0 skipped** |
+| same, after | **529 passed, 7 skipped** (+12 local store tests; the 7 skips are the Redis file) |
+| CI main suite | **529 passed, 7 skipped** — matches local exactly |
+| CI Redis step | **7 passed in 0.09s** against real `redis:7-alpine` |
+| Lock diff after declaring `redis` directly | provenance annotation only; pin already `redis==6.4.0` |
+
+### Two bugs the first test run caught, both in code written that session
+
+1. **The degraded path logged once per request and re-paid the connect
+   timeout each time** — measured ~1s per call against a closed port. A dead
+   Redis would have added a second of latency to every request and flooded the
+   log. Fixed with a 30s cool-down: one probe per 30s, one warning per outage.
+2. **`/health` would have reported `redis` against a dead server.** Building a
+   redis-py client performs no I/O — `register_script` only computes a SHA
+   locally — so the client looks healthy until the first real command. It now
+   pings.
+
+### What is NOT verified, and cannot be here
+
+This machine has **no Docker, no `redis-server`, no Memurai, and WSL has no
+installed distribution**, so the Redis path cannot run locally at all — all 7
+of those tests skip. The only evidence is the CI step, which is why that step
+greps for a nonzero passed count rather than trusting the exit code: an
+all-skipped pytest run exits 0, so a green job alone could not distinguish
+"the limiter works" from "nothing ran". If you change that env block, the
+grep is what stops it failing silently.
+
+**The open bar for whoever merges this:** it has never been exercised by two
+real API replicas against one Redis. The property is asserted by two store
+objects with separate connections, which is the right unit-level proxy, but
+Phase M is where it meets an actual scaled deployment.
+
+---
+
 ## 2. What is DONE (verified by running it, not by reading changelogs)
 
 Phases A–H shipped. **The session column matters** — a row is evidence only for
@@ -457,7 +539,7 @@ roadmap entirely and will be missed if nobody looks for them:
 
 | ID | What | Effort | State |
 |---|---|---|---|
-| S10 | Rate limiting → Redis. The in-process limiter breaks at more than one replica, so this is deploy-adjacent. | M x M | **OPEN** |
+| ~~S10~~ | ~~Rate limiting → Redis~~ | | DONE, section 1d |
 | ~~B1~~ | ~~Decompose `analyze_dependencies` and `review_repository`~~ | | DONE, section 1c |
 | ~~B2~~ | ~~CC algorithm vs radon~~ | | DONE `f7e87cf` |
 | ~~B3~~ | ~~Declare what the complexity ranking counts~~ | | DONE `2f8a077` |
@@ -465,9 +547,9 @@ roadmap entirely and will be missed if nobody looks for them:
 | ~~B5~~ | ~~Duplicate-similarity threshold~~ | | DONE `590c980` |
 | ~~F3~~ | ~~Sort the file list~~ | | DONE `2f8a077` |
 
-**B1 is done (section 1c).** What remains is **S10** (Redis rate limiting) and
-**M** (deploy), which belong together — nothing blocks either, but M is
-outward-facing and needs an explicit go-ahead.
+**S10 is done (section 1d) and B1 is done (section 1c). The unassigned
+backlog is empty.** What remains is **M** (deploy), which nothing blocks but
+which is outward-facing and needs an explicit go-ahead.
 
 ### Known open, none of them blocking
 
