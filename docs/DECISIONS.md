@@ -928,6 +928,19 @@ unreachable. Three options, all defensible:
   was considered acceptable then. The code costs nothing extra because the
   in-process store is kept anyway for single-container deployments.
 
+  **What that sentence understates, found in review on 2026-09-09:** the
+  in-process store is *empty* at the moment of failover, so the first thing a
+  caller meets after Redis drops is a fresh full budget rather than the
+  remainder of the one it had been spending. A Redis that flaps therefore
+  hands out roughly double the configured budget over the flap — Redis
+  window, then a brand-new in-process window, then back to the Redis window
+  after the 30s cool-down. "Per-replica instead of global" describes the
+  steady state correctly and the transition not at all. This is accepted, not
+  fixed: carrying the spent count across would mean reading it out of the
+  Redis that just became unreachable. It is bounded by the cool-down and by
+  the outage being an outage, but an operator reading only the sentence above
+  would under-predict traffic admitted during a flapping broker.
+
 Two details fell out of testing rather than design, and both were bugs the
 first test run caught:
 

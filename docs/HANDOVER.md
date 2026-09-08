@@ -461,6 +461,43 @@ real API replicas against one Redis. The property is asserted by two store
 objects with separate connections, which is the right unit-level proxy, but
 Phase M is where it meets an actual scaled deployment.
 
+### Reviewed 2026-09-09 — three fixed, three accepted
+
+A review before merge found eight items. Three were fixed on this branch and
+are covered by tests:
+
+* **`REDIS_URL` never reached the api container.** It was documented as a
+  supported `api` variable in DEPLOYMENT.md and `.env.example` but was absent
+  from the `environment:` block, so the documented deployment path did
+  nothing at all — the limiter stayed in-process at N x the budget while
+  `/health` said `in-process` and sent the operator to debug Redis
+  connectivity that was never attempted. **The whole feature was unreachable
+  as documented.** CI could not have caught it: the Redis tests set
+  `REDIS_URL` in the pytest env directly, never through compose. A new
+  `test_compose_contract.py` now asserts the general rule — every knob
+  documented for `api` must be present *and* read from the host environment.
+* **The in-process store leaked a bucket per departed client** (measured: 201
+  buckets survived a full idle window). It now sweeps at most once per window.
+  Note the reviewer's suggested fix — delete-when-empty — would never have
+  fired; consume() never stores an empty list.
+* **`active_backend()` demoted the limiter it was reporting on**, so an
+  unauthenticated `/health` caller could drop the container to the per-replica
+  window. It now reports only, and caches for 5s so PING rate is bounded.
+
+Three are **accepted, not fixed** — real, low, and worth knowing before Phase M
+touches this code:
+
+| # | What | Why it was left |
+|---|---|---|
+| 5 | `reset()`'s error path calls `_drop_redis_store()`, which zeroes `_degraded_until` and cancels an in-flight cool-down, so the next request re-pays the ~1s connect timeout | Reachable only through `reset_rate_limiter()`, which is test-only in practice despite being documented "harmless in production" |
+| 6 | A `socket_timeout` on a command Redis actually ran is indistinguishable from one it never received, so that request spends a unit in Redis *and* in the fallback | No clean fix without idempotency keys; bounded to the first such request per 30s cool-down |
+| 7 | `test_consume_through_the_module_uses_redis_when_configured` calls the module-level `reset()`, which SCANs and deletes every `ratelimit:*` key on whatever `REDIS_URL` points at | Harmless in CI (isolated db); would wipe real limiter buckets for a developer running the suite against a live stack |
+
+D34 has been corrected on a related point the review surfaced: the in-process
+store is empty at failover, so a flapping Redis hands out roughly double the
+configured budget across the flap. "Per-replica instead of global" describes
+the steady state and not the transition.
+
 ---
 
 ## 2. What is DONE (verified by running it, not by reading changelogs)
