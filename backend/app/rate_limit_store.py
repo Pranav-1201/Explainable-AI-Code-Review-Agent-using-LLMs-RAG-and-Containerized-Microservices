@@ -46,12 +46,44 @@ class InProcessStore:
     def __init__(self):
         self._lock = threading.Lock()
         self._buckets = {}
+        self._last_sweep = time.monotonic()
+
+    def _sweep_locked(self, now, window_seconds):
+        """Drop every bucket whose newest hit has aged out. Lock must be held.
+
+        The Redis store gets this for free from PEXPIRE. Here nothing revisits
+        a key once its client stops calling, so without a sweep a long-lived
+        API accumulates one entry per distinct (bucket, client) forever and a
+        public deployment ends in an OOM keyed by source address.
+
+        Note the per-key filter in consume() cannot do this job: it only ever
+        touches the key being consumed, and it never stores an empty list
+        anyway (the admit path appends before storing, and the reject path
+        requires len(hits) >= limit >= 1). Pruning has to be a sweep.
+
+        window_seconds comes from the calling request rather than being stored
+        per bucket because there is exactly one window in the system --
+        api_guard passes _RATE_WINDOW_SECONDS on every call. If per-route
+        windows ever land, the age test has to move into the bucket.
+        """
+        dead = [
+            key for key, hits in self._buckets.items()
+            if not hits or now - max(hits) >= window_seconds
+        ]
+        for key in dead:
+            del self._buckets[key]
+        self._last_sweep = now
 
     def consume(self, bucket, client, limit, window_seconds):
         now = time.monotonic()
         key = (bucket, client)
 
         with self._lock:
+            # At most one pass per window, so the cost is amortised to O(keys)
+            # per window rather than paid on every request.
+            if now - self._last_sweep >= window_seconds:
+                self._sweep_locked(now, window_seconds)
+
             hits = self._buckets.get(key, [])
             # Drop everything outside the trailing window.
             hits = [t for t in hits if now - t < window_seconds]

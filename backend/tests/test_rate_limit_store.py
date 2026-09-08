@@ -5,14 +5,17 @@ script, and the property that two replicas share one budget — needs a real
 server and lives in test_rate_limit_redis.py, which CI runs against a service
 container.
 
-The most important test in this file is the last one. It asserts that two
-in-process stores do NOT share a budget: that is the S10 defect stated as an
-executable fact, and its twin in the Redis file asserts the opposite. A fixture
-that has never been watched failing against the pre-fix behaviour proves
+The most important test in this file is
+test_two_in_process_stores_do_not_share_a_budget (named rather than placed,
+because "the last one" stops being true the moment anyone appends). It asserts
+that two in-process stores do NOT share a budget: that is the S10 defect stated
+as an executable fact, and its twin in the Redis file asserts the opposite. A
+fixture that has never been watched failing against the pre-fix behaviour proves
 nothing, and this pair is how that gets watched without a Redis to hand.
 """
 
 import logging
+import time
 
 import pytest
 
@@ -192,3 +195,72 @@ def test_two_in_process_stores_do_not_share_a_budget():
 
     # Budget already spent globally, yet the second replica admits it anyway.
     assert replica_b.consume("scan", "same-client", 1, 60.0) is None
+
+
+def test_in_process_store_does_not_leak_a_key_per_departed_client():
+    """One-shot callers must not accumulate a dict entry for the process life.
+
+    The Redis store expires each key one window after its newest hit
+    (PEXPIRE). The in-process store had no equivalent, so a client that
+    called once and never returned kept its bucket forever and a public
+    deployment grew one entry per distinct source address until the container
+    ran out of memory. This is the default store when REDIS_URL is unset AND
+    the store a Redis outage degrades to, so it is reachable both ways.
+
+    The empty-list case is NOT the leak and never occurs: consume() stores
+    hits non-empty on both paths -- it appends before storing when admitting,
+    and the reject path requires len(hits) >= limit >= 1. Nothing ever
+    revisits a departed client's key, so the fix has to be a sweep rather
+    than a delete-when-empty.
+
+    Real time with a tiny window rather than a patched clock: monkeypatching
+    time.monotonic would freeze it process-wide for the duration of the test.
+    """
+    window = 0.05
+    store = rate_limit_store.InProcessStore()
+
+    for i in range(200):
+        assert store.consume("scan", f"one-shot-{i}", 60, window) is None
+    assert len(store._buckets) == 200
+
+    # Every one of those windows has now fully expired.
+    time.sleep(window + 0.02)
+    store.consume("scan", "a-later-caller", 60, window)
+
+    assert len(store._buckets) == 1, (
+        f"{len(store._buckets)} buckets survived a full window with no "
+        "traffic; departed clients are never pruned"
+    )
+
+
+def test_the_sweep_is_selective_not_a_blanket_clear():
+    """A sweep must drop only buckets whose every hit has aged out.
+
+    Dropping a live one would silently hand a caller that had already spent
+    its budget a fresh window -- a limiter that forgets is worse than one
+    that leaks. This forces a real sweep and asserts both directions at
+    once, so a blanket clear fails here even though it would satisfy the
+    leak test above.
+    """
+    window = 0.3
+    store = rate_limit_store.InProcessStore()
+
+    # Calls once and never returns: must be gone after the sweep.
+    store.consume("scan", "departed", 5, window)
+
+    store.consume("scan", "steady", 5, window)
+    time.sleep(0.2)
+    # Refreshes its bucket, so it is still inside the window at sweep time.
+    store.consume("scan", "steady", 5, window)
+    time.sleep(0.15)
+
+    # Any call after a full window has elapsed is what drives the sweep.
+    store.consume("scan", "trigger", 5, window)
+
+    assert ("scan", "departed") not in store._buckets, (
+        "the sweep did not run, so this test proves nothing about selectivity"
+    )
+    assert ("scan", "steady") in store._buckets, (
+        "the sweep dropped a bucket that was still inside its window, "
+        "handing that caller a fresh budget"
+    )
