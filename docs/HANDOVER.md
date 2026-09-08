@@ -4,13 +4,21 @@
 short as *"finish my project"*, this file is the whole brief. Read it, then
 `docs/CONSTRAINTS.md`, then start at the next unfinished phase below.
 
-**Last updated:** 2026-09-08 · **Updated by:** Claude Opus 5 session
-`9b583d0e` · **Branch at handover:** `s10/redis-rate-limiting` — **pushed**,
-**CI GREEN** (run `34263975530`, all 3 jobs), **3 commits, NOT MERGED**.
-`main` is unchanged at `5fa6b6e`.
-**S10 is complete** — section 1d. B1 is complete (1c); phases L and K are
-complete and F1 is complete (1a–1b). **The unassigned backlog is now empty.**
-The only thing left in the roadmap is **M — deploy**.
+**Last updated:** 2026-09-09 · **Updated by:** Claude Opus 5 session
+`500a0fca` · **Branch at handover:** `main`, clean and level with
+`origin/main`.
+
+**S10 IS MERGED AND SHIPPED.** `main` = `origin/main` = **`c396f02`**
+("Merge S10: share the rate-limit window across API replicas"), **CI GREEN on
+the merge commit** (run `34270025369`, all 3 jobs), branch
+`s10/redis-rate-limiting` **deleted local and remote**. It was reviewed before
+merge and three defects were fixed on the branch first — see "Reviewed
+2026-09-09" in section 1d, and read it before touching this code, because one
+of them meant the feature did nothing at all via its documented path.
+
+B1 is complete (1c); phases L and K are complete and F1 is complete (1a–1b).
+**The unassigned backlog is empty.** The only thing left in the roadmap is
+**M — deploy**.
 
 > **Read this before touching CI on a new branch.** `s10/redis-rate-limiting`
 > got **no CI run at all** when it was pushed, silently. `ci.yml` triggers on
@@ -73,8 +81,9 @@ The only thing left in the roadmap is **M — deploy**.
 > **Phase K is DONE** — B6, F10. **F1 is DONE** — light mode, closing Phase I.
 > **Backlog B2, B3, B4, B5 and F3 are DONE.** All unpushed. Sections 1a, 1b.
 >
-> **B1 is DONE (2026-09-05)** — section 1c. **S10 is DONE (2026-09-08)** —
-> section 1d. **What is left: Phase M** (deploy). Nothing else is open.
+> **B1 is DONE (2026-09-05)** — section 1c. **S10 is DONE, and merged to
+> `main` at `c396f02` on 2026-09-09** — section 1d. **What is left: Phase M**
+> (deploy). Nothing else is open.
 
 ---
 
@@ -394,8 +403,17 @@ section 3 sets for feature work.
 
 ## 1d. S10 — Redis rate limiting, done 2026-09-08
 
-Branch `s10/redis-rate-limiting`, 3 commits, **pushed, CI green (run
-`34263975530`, all 3 jobs), NOT merged.** `main` is untouched at `5fa6b6e`.
+**Merged 2026-09-09 at `c396f02`**, CI green on the merge commit (run
+`34270025369`, all 3 jobs), branch deleted. 7 commits in the end: the original
+3, then 4 more from the pre-merge review below.
+
+Measured on the merged `main`, every command run fresh that session: pytest
+**535 passed / 7 skipped**, vitest **173 passed / 20 files**, `tsc -b --force`
+**1200 files compiled, 122 first-party, 0 errors**, production build clean,
+Playwright **20/20** on the affected specs at CI's `--workers=1 --retries=2`.
+CI's own Redis step reported **7 passed in 0.06s** against a real
+`redis:7-alpine` — the count matters, because that step exists to tell "the
+limiter works" apart from "nothing ran".
 
 The limiter kept its window in a process-local dict, so each API replica
 granted the full budget and the effective limit was N x

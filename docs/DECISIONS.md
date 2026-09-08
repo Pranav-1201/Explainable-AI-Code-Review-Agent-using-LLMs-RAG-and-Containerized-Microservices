@@ -970,3 +970,53 @@ the CI backend job, in a step that greps for a nonzero passed count — an
 all-skipped run exits 0, so the exit code alone could not distinguish "the
 limiter works" from "nothing ran". The local half of the suite covers the
 in-process store, the fallback, and the delegation.
+
+---
+
+## D35 — /health reports the limiter's backend but must never change it
+
+**Date:** 2026-09-09 · **Decided by:** Claude Opus 5 (session `500a0fca`)
+
+S10's `active_backend()` pinged Redis and, on failure, called
+`_enter_degraded_locked` — dropping the cached client and starting the 30s
+cool-down. A pre-merge review caught that this lets a read-only health report
+mutate the control it reports on: one PING over the 1s `socket_timeout` under
+load demoted the whole container to the per-replica window for 30 seconds, at
+exactly the moment load was high. `/health` is in `PUBLIC_PATHS` and is not
+itself rate limited, so the trigger is reachable without a key.
+
+**Considered and rejected: just delete the demotion.** With the client still
+cached, every `/health` would then re-pay the full socket timeout against a
+dead Redis — precisely the per-request reconnect flood the cool-down exists to
+prevent. `health()` is sync and so runs in the anyio threadpool, so that trade
+would let `/health` traffic hold a worker thread per request whenever Redis was
+slow, which is worse than the bug being fixed.
+
+**Chosen: report only, and cache the answer for 5s.** `consume()` owns the
+degraded transition, because it is the path that actually needs a working
+store. The PING rate is then bounded by time rather than by how often anyone
+calls `/health`, which fixes both halves. The cache key includes `REDIS_URL` so
+a changed URL is never answered from the previous one's probe.
+
+**A general lesson worth keeping:** the review's claim that an unauthenticated
+caller could hold the limiter degraded *indefinitely* was wrong — the cool-down
+already bounds probes to one per 30s regardless of call rate. The underlying
+defect was real and the severity was not. Findings get adjudicated against the
+code, not banked because a reviewer wrote them down.
+
+### Three findings accepted rather than fixed
+
+Recorded so the next session does not rediscover them as new:
+
+* `reset()`'s error path calls `_drop_redis_store()`, which zeroes
+  `_degraded_until` and cancels an in-flight cool-down. Reachable only via
+  `reset_rate_limiter()`, which is test-only in practice.
+* A `socket_timeout` on a command Redis actually executed is indistinguishable
+  from one it never received, so that request spends a unit in Redis *and* in
+  the fallback. No clean fix without idempotency keys; bounded to the first
+  such request per cool-down.
+* `test_consume_through_the_module_uses_redis_when_configured` calls the
+  module-level `reset()`, which SCANs and deletes every `ratelimit:*` key on
+  whatever `REDIS_URL` points at. Harmless in CI's isolated database; would
+  wipe real limiter buckets for a developer running the suite against a live
+  stack.
