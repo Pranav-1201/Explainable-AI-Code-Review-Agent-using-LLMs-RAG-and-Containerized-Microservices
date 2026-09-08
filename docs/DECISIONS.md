@@ -903,3 +903,57 @@ Two limits, recorded so nobody over-reads the guarantee:
   over every repository. The manifest parsers in particular are exercised by
   whatever manifests this repo happens to have; `test_b1_contract.py` covers
   all six parsers precisely because the gate cannot.
+
+## D34 — The rate limiter degrades to in-process rather than failing open or closed
+
+**Date:** 2026-09-08 · **Decided by:** Claude Opus 5 (session `9b583d0e`)
+
+S10 moved the rate-limit window into the Redis the stack already runs for
+Celery, because the in-process counter grants the full budget once per
+replica — the effective limit was N x `RATE_LIMIT_PER_MINUTE`, silently.
+
+The real decision was not the store, it was what happens when Redis is
+unreachable. Three options, all defensible:
+
+* **Fail open** — allow the request. Rejected: this deletes the control during
+  exactly the incident where shedding load matters, and `/scan` runs
+  `git clone` on request. A Redis blip would restore the unlimited-clone
+  surface Phase A closed.
+* **Fail closed** — 429 everything. Rejected: it converts a broker hiccup into
+  a total API outage. Redis is already a hard dependency of the queue, so this
+  is arguable, but the queue degrades to eager mode rather than refusing, and
+  the limiter should not be stricter than the thing it protects.
+* **Degrade to the in-process window** — chosen. The limit stays real, just
+  per-replica instead of global, which is precisely the pre-S10 behaviour and
+  was considered acceptable then. The code costs nothing extra because the
+  in-process store is kept anyway for single-container deployments.
+
+Two details fell out of testing rather than design, and both were bugs the
+first test run caught:
+
+* Without a cool-down, every request during an outage re-paid the connect
+  timeout — measured at ~1s per call against a closed port — and wrote one log
+  line each. A dead Redis would have added a second of latency to every
+  request and flooded the log. A 30s cool-down makes an outage one probe per
+  30s and one warning per outage.
+* `/health` reporting must **ping**. Constructing a redis-py client performs no
+  I/O — `register_script` only computes a SHA locally — so a client pointed at
+  a dead server looks healthy until the first real command. Reporting `redis`
+  there would have made `/health` assert the exact thing an operator is
+  checking for.
+
+The window is a sorted set consumed by one Lua script, not `INCR`/`EXPIRE`.
+A fixed window admits a double burst across the boundary and cannot produce a
+true time-to-oldest-hit for `Retry-After`; the ZSET preserves the sliding
+window the three existing `api_guard` tests already assert, so they were not
+touched. The script's member is unique per hit rather than the timestamp,
+because a sorted set is a set and two hits in one millisecond would otherwise
+collapse into one element and undercount.
+
+**What is and is not verified here.** This machine has no Docker, no
+`redis-server` and no WSL distribution, so the Redis path could not be run
+locally at all. It is tested by a `redis:7-alpine` service container added to
+the CI backend job, in a step that greps for a nonzero passed count — an
+all-skipped run exits 0, so the exit code alone could not distinguish "the
+limiter works" from "nothing ran". The local half of the suite covers the
+in-process store, the fallback, and the delegation.
