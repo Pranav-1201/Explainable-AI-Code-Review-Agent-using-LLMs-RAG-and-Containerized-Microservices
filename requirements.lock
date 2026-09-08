@@ -113,7 +113,9 @@ python-dotenv==1.2.2
 python-multipart==0.0.32
     # via -r requirements.txt
 redis==6.4.0
-    # via kombu
+    # via
+    #   -r requirements.txt
+    #   kombu
 requests==2.34.2
     # via -r requirements.txt
 rich==15.0.0

@@ -20,6 +20,12 @@
 #                         Setting it REPLACES the defaults (an explicit
 #                         allowlist means exactly what it says).
 #   RATE_LIMIT_PER_MINUTE Requests per minute per client per route. Default 60.
+#   REDIS_URL             If set, the rate-limit window is kept in Redis and the
+#                         budget is shared by every API replica. If UNSET the
+#                         window is process-local, which is correct for a
+#                         single container and N times too generous across N.
+#                         /health reports which store is live. See
+#                         rate_limit_store.py.
 #
 # Reading env at call time is a deliberate testability constraint: it lets the
 # suite monkeypatch os.environ without reloading `main`. celery_app.py reads its
@@ -27,9 +33,9 @@
 
 import ipaddress
 import os
-import threading
-import time
 from urllib.parse import urlparse
+
+from backend.app import rate_limit_store
 
 # Routes that must stay reachable without a key. Uptime monitors and container
 # healthchecks cannot send a secret, and the OpenAPI docs are harmless.
@@ -185,14 +191,17 @@ def validate_repo_url(url) -> str:
 # S3 — Rate limiting
 # ----------------------------------------------------------
 #
-# A fixed-window counter kept in process memory. Deliberately NOT a new
-# dependency (slowapi/redis): the deployment target is a single API container,
-# where in-process state is exactly as accurate as a shared store would be. If
-# the API is ever scaled to replicas this must move to Redis — the limit would
-# otherwise be per-replica. Documented in DEPLOYMENT.md.
-
-_rate_lock = threading.Lock()
-_rate_buckets = {}
+# A sliding window per (route bucket, caller). THE POLICY LIVES HERE — which
+# bucket a route spends from, how big the budget is, and what a exhausted
+# budget means — while the storage behind it lives in rate_limit_store.py.
+#
+# That split is S10. The window used to be a process-local dict, which is
+# exactly as accurate as a shared store on a single container and N times too
+# generous across N replicas. Setting REDIS_URL now moves the window into the
+# Redis the stack already runs for Celery, making the limit global; leaving it
+# unset keeps the original in-process behaviour. A Redis outage degrades back
+# to in-process rather than failing open or closed — see DECISIONS.md D34 and
+# DEPLOYMENT.md.
 
 
 def rate_limit_per_minute() -> int:
@@ -208,8 +217,16 @@ def rate_limit_per_minute() -> int:
 
 def reset_rate_limiter():
     """Clear all buckets. Used by tests; harmless in production."""
-    with _rate_lock:
-        _rate_buckets.clear()
+    rate_limit_store.reset()
+
+
+def rate_limit_backend() -> str:
+    """'redis' or 'in-process' — which store is actually serving the limit.
+
+    Reported by /health so a deployment that has silently degraded to a
+    per-replica limit is visible rather than merely documented.
+    """
+    return rate_limit_store.active_backend()
 
 
 def check_rate_limit(bucket: str, client: str):
@@ -219,24 +236,9 @@ def check_rate_limit(bucket: str, client: str):
     Buckets are per-route so exhausting the expensive /scan budget does not lock
     an operator out of unrelated endpoints.
     """
-    limit = rate_limit_per_minute()
-    now = time.monotonic()
-    key = (bucket, client)
-
-    with _rate_lock:
-        hits = _rate_buckets.get(key, [])
-        # Drop everything outside the trailing window.
-        hits = [t for t in hits if now - t < _RATE_WINDOW_SECONDS]
-
-        if len(hits) >= limit:
-            oldest = min(hits)
-            retry_after = max(1, int(_RATE_WINDOW_SECONDS - (now - oldest)) + 1)
-            _rate_buckets[key] = hits
-            return retry_after
-
-        hits.append(now)
-        _rate_buckets[key] = hits
-        return None
+    return rate_limit_store.consume(
+        bucket, client, rate_limit_per_minute(), _RATE_WINDOW_SECONDS
+    )
 
 
 def client_identity(request) -> str:
