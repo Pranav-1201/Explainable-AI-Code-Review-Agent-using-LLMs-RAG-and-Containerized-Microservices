@@ -197,11 +197,22 @@ _fallback_store = InProcessStore()
 # turns an outage into one probe every 30s.
 _DEGRADED_COOLDOWN_SECONDS = 30.0
 
+# How long a /health answer stays good for. health() is sync, so it runs in the
+# anyio threadpool and a PING is a blocking round trip; /health is in
+# PUBLIC_PATHS and is not itself rate limited, so without this an unauthenticated
+# caller looping GET /health holds one worker thread per request for the full
+# socket timeout whenever Redis is slow. Short enough that an operator watching
+# /health sees a real outage within a few seconds.
+_BACKEND_PROBE_TTL_SECONDS = 5.0
+
 _state_lock = threading.Lock()
 _redis_store = None
 _redis_url = None
 _degraded_logged = False
 _degraded_until = 0.0
+# (expires_at, url, answer). The url is part of the key so a changed REDIS_URL
+# can never be answered from the previous one's probe.
+_probe_cache = (0.0, None, None)
 
 
 def _redis_errors():
@@ -284,11 +295,12 @@ def _enter_degraded_locked(exc):
 
 
 def _drop_redis_store():
-    global _redis_store, _redis_url, _degraded_until
+    global _redis_store, _redis_url, _degraded_until, _probe_cache
     with _state_lock:
         _redis_store = None
         _redis_url = None
         _degraded_until = 0.0
+        _probe_cache = (0.0, None, None)
 
 
 def consume(bucket, client, limit, window_seconds):
@@ -350,14 +362,40 @@ def active_backend():
     computes a SHA locally — so a store built against a dead server looks
     perfectly healthy until the first real command. Reporting 'redis' there
     would make /health assert exactly the thing an operator is checking for.
+
+    It REPORTS and does not demote. This used to call _enter_degraded_locked on
+    a failed PING, which let a read-only health check mutate the limiter: one
+    ping over the 1s socket_timeout under load dropped the whole container to
+    the per-replica window for 30s, at exactly the moment load was high, and
+    /health is reachable unauthenticated. consume() owns that transition — it
+    is the path that actually needs a working store. The answer is cached for
+    _BACKEND_PROBE_TTL_SECONDS so the PING rate is bounded by time rather than
+    by how often anyone calls /health.
     """
+    global _probe_cache
+
+    url = os.getenv("REDIS_URL", "").strip()
+    now = time.monotonic()
+
+    with _state_lock:
+        expires_at, cached_url, answer = _probe_cache
+        if answer is not None and cached_url == url and now < expires_at:
+            return answer
+
+    # _current_store() takes _state_lock, and it is not reentrant.
     store = _current_store()
     if store is None:
-        return "in-process"
-    try:
-        store._client.ping()
-    except _redis_errors() as exc:
-        with _state_lock:
-            _enter_degraded_locked(exc)
-        return "in-process"
-    return "redis"
+        answer = "in-process"
+    else:
+        try:
+            store._client.ping()
+        except _redis_errors():
+            answer = "in-process"
+        else:
+            answer = "redis"
+
+    with _state_lock:
+        _probe_cache = (
+            time.monotonic() + _BACKEND_PROBE_TTL_SECONDS, url, answer
+        )
+    return answer

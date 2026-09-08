@@ -264,3 +264,71 @@ def test_the_sweep_is_selective_not_a_blanket_clear():
         "the sweep dropped a bucket that was still inside its window, "
         "handing that caller a fresh budget"
     )
+
+
+# ----------------------------------------------------------
+# /health probing — reporting must not mutate what it reports on
+# ----------------------------------------------------------
+
+class _CountingClient:
+    """Minimal stand-in for a redis-py client that counts PINGs."""
+
+    def __init__(self, fail=False):
+        self.pings = 0
+        self._fail = fail
+
+    def ping(self):
+        self.pings += 1
+        if self._fail:
+            raise OSError("connection refused")
+        return True
+
+    def register_script(self, script):
+        return lambda keys, args: 0
+
+
+def _install_client(monkeypatch, client):
+    monkeypatch.setenv("REDIS_URL", "redis://installed-by-test:6379/0")
+    monkeypatch.setattr(
+        rate_limit_store,
+        "_build_redis_store",
+        lambda url: rate_limit_store.RedisStore(client),
+    )
+    rate_limit_store._drop_redis_store()
+
+
+def test_a_failing_health_probe_does_not_demote_the_limiter(monkeypatch):
+    """/health reports on the limiter; it must not change it.
+
+    active_backend() used to call _enter_degraded_locked on a failed PING, so
+    one ping exceeding the 1s socket_timeout under load dropped the whole
+    container to the per-replica window for 30s -- at exactly the moment load
+    was high. /health is in PUBLIC_PATHS and is not itself rate limited, so
+    the trigger is reachable unauthenticated. consume() owns the degraded
+    transition; a read-only report must not.
+    """
+    _install_client(monkeypatch, _CountingClient(fail=True))
+
+    assert rate_limit_store.active_backend() == "in-process"
+
+    assert rate_limit_store._degraded_until == 0.0, (
+        "a health probe started a cool-down; reporting mutated the limiter"
+    )
+
+
+def test_health_probes_are_bounded_however_often_health_is_called(monkeypatch):
+    """The probe must not be one blocking round trip per /health call.
+
+    health() is sync, so it runs in the anyio threadpool. Against a slow Redis
+    an unauthenticated caller looping GET /health would otherwise hold a
+    worker thread for the full socket timeout on every request.
+    """
+    client = _CountingClient()
+    _install_client(monkeypatch, client)
+
+    for _ in range(10):
+        assert rate_limit_store.active_backend() == "redis"
+
+    assert client.pings == 1, (
+        f"{client.pings} PINGs for 10 /health calls; the probe is unbounded"
+    )
