@@ -66,7 +66,7 @@ Edit `.env` and set at minimum:
 
 | Variable | Why |
 |---|---|
-| `API_KEY` | **Not optional here.** `/scan` runs `git clone` on request. Leaving it unset publishes that to anyone who finds the host. |
+| `API_KEY` | **Not optional here.** `/scan` runs `git clone` on request. Leaving it unset publishes that to anyone who finds the host. It reaches the API and, through `/config.js`, the browser — nothing is rebuilt. |
 | `SITE_ADDRESS` | Your hostname, e.g. `scan.example.com`. Unset means plain HTTP on `:80`. |
 | `BACKUP_HOST_DIR` | Where snapshots land on the host, e.g. `/var/lib/acra-backups`. |
 
@@ -87,6 +87,8 @@ Confirm each of these yourself. None of them is asserted by this repository.
 - [ ] `curl -fsS https://<host>/api/health` returns JSON containing
       `"auth": "enabled"`. **If it says `disabled`, stop** — `API_KEY` did not
       reach the container, and the deployment is open.
+- [ ] `curl -fsS https://<host>/config.js` contains your key, and a scan
+      started from the UI does not fail with "Unauthorized".
 - [ ] The app loads at `https://<host>/`.
 - [ ] A deep link such as `https://<host>/history/x` survives a browser
       refresh (proves Caddy's `try_files` is serving the SPA shell).
@@ -212,7 +214,7 @@ doors, which is why neither ships by default.
 | `CELERY_BROKER_URL` | ✅ | ✅ | Broker. Unset ⇒ eager mode. Compose: `redis://redis:6379/0`. |
 | `CELERY_RESULT_BACKEND` | ✅ | ✅ | Optional; scan results persist in SQLite, not here. Compose: `redis://redis:6379/1`. |
 | `SCAN_DB_PATH` | ✅ | ✅ | Scan store path. **Must be the same shared volume path in both** (`/data/scan_states.db`). |
-| `API_KEY` | ✅ | — | Shared secret required in `X-API-Key`. **Unset ⇒ the API is open.** Worker serves no HTTP, so it has none. |
+| `API_KEY` | ✅ | — | Shared secret required in `X-API-Key`. **Unset ⇒ the API is open.** Worker serves no HTTP, so it has none. The `web` container also receives it and serves it to the browser via `/config.js` (D36). |
 | `ALLOWED_ORIGINS` | ✅ | — | Comma-separated CORS origins. Default: localhost dev ports. Never `*`. |
 | `ALLOWED_GIT_HOSTS` | ✅ | — | Comma-separated cloneable hosts. Setting it **replaces** the defaults (github/gitlab/bitbucket). |
 | `RATE_LIMIT_PER_MINUTE` | ✅ | — | Per client, per route. Default 60. |
@@ -228,8 +230,10 @@ abusable, so before the API is reachable publicly:
 1. **Set `API_KEY`** to a long random value. `GET /health` reports
    `"auth": "enabled"` — check it, because an unset key fails open, not closed.
 2. **Set `ALLOWED_ORIGINS`** to the real frontend origin.
-3. **Rebuild the frontend** with `VITE_API_BASE` and `VITE_API_KEY` set — Vite
-   inlines these at build time, so changing them needs a rebuild, not a restart.
+3. **Nothing to rebuild for the key.** The web container serves `API_KEY` to
+   the browser at runtime through `/config.js` (DECISIONS.md D36), so the
+   published image works unchanged and rotating the key is a restart. Only a
+   split-origin deployment still needs `VITE_API_BASE` at build time.
 4. **Keep the reverse proxy in front.** `X-Forwarded-For` is trusted for the
    first hop when identifying clients for rate limiting; that header is
    spoofable if the app is exposed directly.

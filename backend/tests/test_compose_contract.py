@@ -103,3 +103,29 @@ def test_documented_operator_variables_come_from_the_host_environment():
         f"in {COMPOSE.name} instead of read from the host environment: "
         f"{sorted(hardcoded)}"
     )
+
+
+PROD_OVERLAY = REPO_ROOT / "docker-compose.prod.yml"
+
+
+def test_web_service_receives_api_key_for_runtime_config():
+    """The web container renders /config.js from API_KEY (D36).
+
+    The published web image is public, so it is built with no key; the key
+    reaches the browser only through /config.js, which Caddy renders from the
+    web container's own environment. If the overlay stops passing API_KEY to
+    `web`, /config.js serves an empty key and every protected call 401s --
+    the failure this design exists to remove. `web` is a production-only
+    service, so unlike the api contract above this one lives in the overlay.
+    """
+    block = _service_block(PROD_OVERLAY.read_text(encoding="utf-8"), "web")
+
+    match = re.search(r"^\s+API_KEY:\s*(.+)$", block, re.M)
+    assert match, (
+        f"the web service in {PROD_OVERLAY.name} does not receive API_KEY, so "
+        f"/config.js would render an empty key and every scan would 401"
+    )
+    assert match.group(1).strip() == "${API_KEY:-}", (
+        f"web's API_KEY must be the same ${{API_KEY:-}} passthrough the api "
+        f"service uses, so one .env line feeds both; found {match.group(1).strip()!r}"
+    )

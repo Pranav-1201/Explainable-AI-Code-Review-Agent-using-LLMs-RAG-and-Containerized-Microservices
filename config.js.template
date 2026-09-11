@@ -1,0 +1,18 @@
+/*
+ * Runtime configuration, rendered by Caddy on every request (D36).
+ *
+ * The published web image is public, so it is built with no API key. Caddy's
+ * `templates` handler renders this file from the web container's API_KEY --
+ * the same .env value the api container checks -- so the browser receives the
+ * key at runtime instead. `| js` applies Go's JavaScript string escaping; CI
+ * boots with a key containing a double quote, a backslash and '<' and checks
+ * the rendered value byte-for-byte, so that escaping is gated, not assumed.
+ *
+ * Replaces frontend/public/config.js (the key-less local default) in the web
+ * image's final stage, and never runs un-rendered anywhere.
+ *
+ * Readable by anyone who loads the page, exactly as the inlined key was
+ * before: it raises the cost of drive-by abuse of /scan, it does not identify
+ * callers. See frontend/src/lib/api.ts.
+ */
+window.__ACRA_CONFIG__ = { apiKey: "{{env "API_KEY" | js}}" };

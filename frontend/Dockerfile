@@ -31,17 +31,11 @@ COPY frontend/ ./
 ARG VITE_API_BASE=/api
 ENV VITE_API_BASE=$VITE_API_BASE
 
-# VITE_API_KEY is NOT a secret, despite the name, and this is the boundary
-# where someone will be tempted to treat it as one. Anything inlined into a
-# static bundle is readable by anyone who loads the page. It raises the cost
-# of drive-by abuse of /scan; it does not identify or isolate callers. See
-# frontend/src/lib/api.ts:8-14. Real per-user auth is roadmap item G.
-#
-# Deliberately left empty by default, and deliberately NOT passed by
-# release.yml: a published image is a public artifact, so baking a key into
-# one publishes the key.
-ARG VITE_API_KEY=
-ENV VITE_API_KEY=$VITE_API_KEY
+# VITE_API_KEY is deliberately NOT a build argument (D36). A published image
+# is a public artifact, so a key baked into one is a published key. The
+# browser gets the key at runtime from /config.js instead, which Caddy renders
+# from the web container's API_KEY. api.ts still reads VITE_API_KEY as a
+# local-development fallback, where no image is involved.
 
 # The public origin, e.g. https://example.com. Unlike VITE_API_KEY this IS safe
 # to bake into a published image: it is the address the site answers on, which
@@ -66,6 +60,10 @@ RUN npm run build
 FROM caddy:2-alpine
 
 COPY --from=build /app/dist /srv
+# The bundle's key-less public/config.js is replaced by the template Caddy
+# renders per request (Caddyfile, handle /config.js). Copied AFTER the bundle
+# so it wins.
+COPY config.js.template /srv/config.js
 COPY Caddyfile /etc/caddy/Caddyfile
 
 EXPOSE 80 443
