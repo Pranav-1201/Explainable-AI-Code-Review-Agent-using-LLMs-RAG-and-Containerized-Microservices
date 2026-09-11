@@ -66,7 +66,7 @@ Edit `.env` and set at minimum:
 
 | Variable | Why |
 |---|---|
-| `API_KEY` | **Not optional here.** `/scan` runs `git clone` on request. Leaving it unset publishes that to anyone who finds the host. |
+| `API_KEY` | **Not optional here.** `/scan` runs `git clone` on request. Leaving it unset publishes that to anyone who finds the host. It reaches the API and, through `/config.js`, the browser — nothing is rebuilt. |
 | `SITE_ADDRESS` | Your hostname, e.g. `scan.example.com`. Unset means plain HTTP on `:80`. |
 | `BACKUP_HOST_DIR` | Where snapshots land on the host, e.g. `/var/lib/acra-backups`. |
 
@@ -86,7 +86,11 @@ Confirm each of these yourself. None of them is asserted by this repository.
       shows `api` **healthy**, and `web`, `worker`, `redis`, `backup` running.
 - [ ] `curl -fsS https://<host>/api/health` returns JSON containing
       `"auth": "enabled"`. **If it says `disabled`, stop** — `API_KEY` did not
-      reach the container, and the deployment is open.
+      reach the container, and the deployment is open. `enabled` means a key
+      is *required*, not that it is secret — the UI gets it from `/config.js`
+      (DECISIONS.md D36).
+- [ ] `curl -fsS https://<host>/config.js` contains your key, and a scan
+      started from the UI does not fail with "Unauthorized".
 - [ ] The app loads at `https://<host>/`.
 - [ ] A deep link such as `https://<host>/history/x` survives a browser
       refresh (proves Caddy's `try_files` is serving the SPA shell).
@@ -176,6 +180,143 @@ To harden HSTS after the domain has been stable on HTTPS for a while, add
 `Strict-Transport-Security` value in the `Caddyfile`. Both are close to one-way
 doors, which is why neither ships by default.
 
+## Free deploy — Oracle Always Free A1 + DuckDNS
+
+The $0 path: the same compose stack as the section above, on an ARM host,
+behind a free DuckDNS hostname. Anything that describes a provider console is
+**check the console — labels change**; the figures are from Oracle's Always
+Free page as read on 2026-09-10.
+
+### What it costs and what it assumes
+
+- **$0.** Oracle requires a card at signup. Secondary sources report a $1
+  authorisation that is not charged; Oracle's Always Free page itself does not
+  say.
+- **The home region is chosen once and is permanent.** A1 capacity varies by
+  region, and "out of capacity" when creating an A1 instance is commonly
+  reported — if you hit it, retry later.
+- **Only images published after Phase M carry `linux/arm64`.** Every earlier
+  sha is amd64-only and will not pull on this host.
+
+### 1. Create the instance
+
+- Image: Canonical Ubuntu 24.04 (aarch64).
+- Shape: `VM.Standard.A1.Flex`, within the Always Free allowance of
+  **2 OCPUs / 12 GB total**.
+- Boot volume: the default is fine; Always Free covers **200 GB** of boot and
+  block storage combined.
+- Networking: assign a public IPv4 address, and add your SSH public key.
+
+### 2. Open ports 80 and 443 — in two places
+
+Both are required. Caddy's certificate challenge arrives on port 80, and
+either layer on its own still blocks it.
+
+1. **VCN security list** (console): add ingress rules for TCP 80 and TCP 443
+   from `0.0.0.0/0`.
+2. **Host firewall** (on the instance):
+
+   ```bash
+   sudo iptables -L INPUT -n --line-numbers
+   ```
+
+   If a `REJECT` rule is listed, insert ACCEPT rules **above** it, using that
+   rule's line number as `<n>`, then persist them:
+
+   ```bash
+   sudo iptables -I INPUT <n> -p tcp --dport 80 -m state --state NEW -j ACCEPT
+   sudo iptables -I INPUT <n> -p tcp --dport 443 -m state --state NEW -j ACCEPT
+   sudo netfilter-persistent save
+   ```
+
+### 3. Install Docker
+
+```bash
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+```
+
+Log out and back in, then check `docker compose version` reports **v2.24 or
+newer** — the production overlay uses `!reset`, which older versions reject.
+
+### 4. Point a DuckDNS name at it
+
+Create `<name>.duckdns.org` at duckdns.org and set its IP to the instance's
+public IPv4. Confirm it resolves **before** starting the stack:
+
+```bash
+getent hosts <name>.duckdns.org
+```
+
+It must print the instance's public IP. A wrong IP makes Caddy's first
+certificate attempt fail, and failed attempts count against Let's Encrypt's
+rate limit. `duckdns.org` is on the Public Suffix List, so each DuckDNS
+subdomain has a rate-limit bucket of its own rather than sharing one with every
+other DuckDNS user.
+
+### 5. Configure
+
+```bash
+git clone https://github.com/Pranav-1201/AI-Code-Review-Agent.git
+cd AI-Code-Review-Agent
+cp .env.example .env
+sudo mkdir -p /var/lib/acra-backups
+```
+
+Set these in `.env`:
+
+| Variable | Value |
+|---|---|
+| `API_KEY` | the output of `openssl rand -hex 32` |
+| `SITE_ADDRESS` | `<name>.duckdns.org` |
+| `BACKUP_HOST_DIR` | `/var/lib/acra-backups` |
+| `IMAGE_TAG` | a published multi-arch sha. Pin one rather than using `latest`, so the running version is always known and a rollback is a one-line change. |
+
+Check that a sha carries arm64 before using it — `arm64` must appear among
+the architectures listed:
+
+```bash
+docker manifest inspect ghcr.io/pranav-1201/ai-code-review-agent:<sha> | grep architecture
+```
+
+### 6. Start and verify
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+Then work through the verification checklist in the section above — including
+the `/config.js` item — against `https://<name>.duckdns.org`.
+
+### 7. Optional: canonical URLs
+
+Set the repository variable `SITE_URL` to `https://<name>.duckdns.org`
+(Settings, then Secrets and variables, then Actions, then Variables). The next
+published web image bakes it into `sitemap.xml`, canonical links and `og:url`.
+
+### 8. Drill the rollback
+
+Note the running sha, then roll back to an **older multi-arch** sha:
+
+```bash
+IMAGE_TAG=<older-sha> docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+IMAGE_TAG=<older-sha> docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+curl -fsS https://<name>.duckdns.org/api/health
+```
+
+The health check must return 200 with `"auth":"enabled"`. Then return to the
+newer sha the same way. An amd64-only sha fails to pull here with
+`no matching manifest for linux/arm64` — that is the expected error, not a
+broken deploy.
+
+### 9. Known risk: idle reclamation
+
+Oracle may reclaim an Always Free instance that, over 7 days, has CPU p95
+below 20%, network below 20%, and — on A1 only — memory below 20% (Oracle's
+Always Free page). A low-traffic demo can meet all three. Nothing here
+engineers around it: watch utilisation for the first week (`free -m`, `top`),
+and copy the backup directory off the host from time to time.
+
 ## Verification checklist — please confirm on your Docker-capable machine
 
 > Status: the **in-process (eager)** path and a **real out-of-process broker
@@ -212,7 +353,7 @@ doors, which is why neither ships by default.
 | `CELERY_BROKER_URL` | ✅ | ✅ | Broker. Unset ⇒ eager mode. Compose: `redis://redis:6379/0`. |
 | `CELERY_RESULT_BACKEND` | ✅ | ✅ | Optional; scan results persist in SQLite, not here. Compose: `redis://redis:6379/1`. |
 | `SCAN_DB_PATH` | ✅ | ✅ | Scan store path. **Must be the same shared volume path in both** (`/data/scan_states.db`). |
-| `API_KEY` | ✅ | — | Shared secret required in `X-API-Key`. **Unset ⇒ the API is open.** Worker serves no HTTP, so it has none. |
+| `API_KEY` | ✅ | — | Shared secret required in `X-API-Key`. **Unset ⇒ the API is open.** Worker serves no HTTP, so it has none. The `web` container also receives it and serves it to the browser via `/config.js` (D36). |
 | `ALLOWED_ORIGINS` | ✅ | — | Comma-separated CORS origins. Default: localhost dev ports. Never `*`. |
 | `ALLOWED_GIT_HOSTS` | ✅ | — | Comma-separated cloneable hosts. Setting it **replaces** the defaults (github/gitlab/bitbucket). |
 | `RATE_LIMIT_PER_MINUTE` | ✅ | — | Per client, per route. Default 60. |
@@ -228,8 +369,10 @@ abusable, so before the API is reachable publicly:
 1. **Set `API_KEY`** to a long random value. `GET /health` reports
    `"auth": "enabled"` — check it, because an unset key fails open, not closed.
 2. **Set `ALLOWED_ORIGINS`** to the real frontend origin.
-3. **Rebuild the frontend** with `VITE_API_BASE` and `VITE_API_KEY` set — Vite
-   inlines these at build time, so changing them needs a rebuild, not a restart.
+3. **Nothing to rebuild for the key.** The web container serves `API_KEY` to
+   the browser at runtime through `/config.js` (DECISIONS.md D36), so the
+   published image works unchanged and rotating the key is a restart. Only a
+   split-origin deployment still needs `VITE_API_BASE` at build time.
 4. **Keep the reverse proxy in front.** `X-Forwarded-For` is trusted for the
    first hop when identifying clients for rate limiting; that header is
    spoofable if the app is exposed directly.
@@ -336,10 +479,13 @@ GHCR rejects uppercase paths and this repository's owner has capitals.
   closed (which would turn a broker hiccup into a total outage). It logs one
   warning per outage and stops retrying for 30s, so a dead Redis does not add
   a connect timeout to every request. See DECISIONS.md D34.
-- **The API key is a single shared secret**, not per-user auth, and the frontend
-  copy ships inside a public static bundle. It raises the cost of drive-by abuse
-  of `/scan`; it does not identify or isolate callers. A login + short-lived
-  token flow is the real answer if this ever serves more than its owner.
+- **The API key is a single shared value, not per-user auth**, and the web
+  container serves it to every visitor through `/config.js` (D36). On a public
+  host it therefore filters only callers that never load the page; what bounds
+  abuse of `/scan` is the per-IP rate limit, the git-host allowlist, repository
+  URL validation and the disk ceilings. It does not identify or isolate
+  callers. A login + short-lived token flow is the real answer if this ever
+  serves more than its owner.
 - **Disk ceilings bound the caches, not the whole host.** Phase E added LRU
   eviction across both caches (`MAX_CACHE_MB`) and a clone-size watchdog
   (`MAX_REPO_MB`); see "Operations (Phase E) → Disk ceilings" below for the

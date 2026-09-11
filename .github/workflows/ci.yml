@@ -195,9 +195,30 @@ jobs:
           retention-days: 7
 
   deploy-stack:
-    name: Deploy stack (build images + boot)
-    runs-on: ubuntu-latest
+    name: Deploy stack (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
+    strategy:
+      # Both architectures report even when one fails: an arm64-only break is
+      # exactly the signal this matrix exists to produce, and fail-fast would
+      # cancel it as collateral.
+      fail-fast: false
+      matrix:
+        # ubuntu-24.04-arm because the free Oracle A1 host is ARM (Phase M).
+        # The arm64 stack is built AND booted here, natively, before anything
+        # merges -- otherwise the VM would be the first place it ever ran.
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    env:
+      # Phase M (D36): boot the way production must run -- with auth ON. This
+      # job booted with API_KEY unset until now, so it never exercised the path
+      # where a key-less published web image meets an authenticated API, which
+      # is how a documented deploy that 401s on every scan went unnoticed.
+      #
+      # The value deliberately contains a double quote, a backslash and '<':
+      # /config.js renders it into a JavaScript string, and the gate below
+      # reads it back byte-for-byte, so broken escaping fails here and not in
+      # production. It is a throwaway CI value, not a secret.
+      API_KEY: 'ci-key-"quote\backslash<lt>'
 
     # This job exists because the development machine has no Docker, so until
     # now nothing in this repository had ever built the images or started the
@@ -218,8 +239,10 @@ jobs:
           push: false
           load: true
           tags: local/acra:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # One scope per architecture, and named so release.yml can read the
+          # native layers these builds produce for the same commit.
+          cache-from: type=gha,scope=api-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=api-${{ runner.arch }}
 
       - name: Build the web image
         # Context is the repo root, not frontend/, because the Caddyfile lives
@@ -233,8 +256,8 @@ jobs:
           tags: local/acra-web:ci
           build-args: |
             VITE_API_BASE=/api
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=web-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=web-${{ runner.arch }}
 
       - name: Validate the merged compose configuration
         # Renders the base file and the overlay together, resolving variables
@@ -359,6 +382,75 @@ jobs:
             grep -qi "^$header:" /tmp/headers.txt               || { echo "FAIL: missing response header $header" >&2; exit 1; }
           done
           echo "all security headers present"
+
+      - name: Set up Node
+        # The next step evaluates the served /config.js exactly as a browser
+        # would. Installed explicitly rather than trusted from the runner
+        # image, because the arm64 runner is a different image.
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Auth and runtime config through the proxy
+        run: |
+          set -euo pipefail
+
+          echo "--- /api/health reports auth enabled ---"
+          curl -fsS http://localhost/api/health | tee /tmp/health-auth.json
+          echo
+          grep -q '"auth": *"enabled"' /tmp/health-auth.json \
+            || { echo "FAIL: API_KEY did not reach the api container" >&2; exit 1; }
+
+          echo "--- protected route without the key: 401 ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost/api/scans)
+          test "$code" = "401" || { echo "FAIL: /api/scans without a key returned $code" >&2; exit 1; }
+
+          echo "--- protected route with the key: 200 ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "X-API-Key: $API_KEY" http://localhost/api/scans)
+          test "$code" = "200" || { echo "FAIL: /api/scans with the key returned $code" >&2; exit 1; }
+
+          echo "--- /config.js serves the key, uncached ---"
+          code=$(curl -s -D /tmp/config-headers.txt -o /tmp/config.js -w '%{http_code}' http://localhost/config.js)
+          test "$code" = "200" || { echo "FAIL: /config.js returned $code" >&2; exit 1; }
+          grep -qi '^cache-control: *no-store' /tmp/config-headers.txt \
+            || { echo "FAIL: /config.js is cacheable, so a rotated key would be served stale" >&2; cat /tmp/config-headers.txt >&2; exit 1; }
+
+          # Evaluate the served file the way a browser does and compare the key
+          # byte-for-byte. A template that is served un-rendered, or that does
+          # not escape the quote/backslash/'<' in the CI key, fails here.
+          node -e '
+            const vm = require("vm");
+            const fs = require("fs");
+            const ctx = { window: {} };
+            vm.runInNewContext(fs.readFileSync("/tmp/config.js", "utf8"), ctx);
+            const cfg = ctx.window.__ACRA_CONFIG__;
+            const got = cfg && cfg.apiKey;
+            if (got !== process.env.API_KEY) {
+              console.error("FAIL: config.js apiKey", JSON.stringify(got), "is not API_KEY", JSON.stringify(process.env.API_KEY));
+              process.exit(1);
+            }
+            console.log("config.js apiKey matches API_KEY byte-for-byte");
+          '
+
+          echo "--- the key is never baked into a served file ---"
+          # grep's exit code decides this, and only 1 passes: 0 means the key
+          # was found, and anything else -- a missing path, or `exec` failing
+          # because web is down -- means the search never ran, which must not
+          # read as green. All of /srv, not just /srv/assets, so index.html and
+          # 404.html are covered. /srv/config.js cannot match: it holds the
+          # un-rendered template, and the key exists only in the response.
+          # NEEDLE is passed explicitly so an empty web-side API_KEY can never
+          # become an empty pattern that matches every file.
+          set +e
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T -e NEEDLE="$API_KEY" web \
+            sh -c 'grep -rlF -- "$NEEDLE" /srv'
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "no served file contains the key" ;;
+            0) echo "FAIL: the API key is baked into the served files listed above" >&2; exit 1 ;;
+            *) echo "FAIL: could not search /srv (exit $rc), so this check proved nothing" >&2; exit 1 ;;
+          esac
 
       - name: Confirm the API port is NOT published
         # The overlay resets it. If this regresses, an unauthenticated API is

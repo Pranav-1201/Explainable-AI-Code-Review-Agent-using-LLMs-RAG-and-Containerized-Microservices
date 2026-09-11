@@ -31,6 +31,12 @@
          purpose, and a same-origin file rather than an inline script because
          the CSP is script-src 'self' with no 'unsafe-inline'. -->
     <script src="/theme-init.js"></script>
+
+    <!-- Runtime configuration (D36): the API key a deployed web container
+         renders from its own environment. A classic script, so it runs before
+         the deferred module bundle and api.ts can read it on the very first
+         request; a same-origin file for the same CSP reason as theme-init.js. -->
+    <script src="/config.js"></script>
   </head>
 
   <body>

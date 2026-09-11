@@ -68,6 +68,11 @@ services:
       # passes it. Compose's :- covers unset AND empty, so the fix belongs
       # here.
       SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      # The key /config.js renders for the browser (D36) -- the SAME host
+      # variable the api service checks, so one .env line feeds both and the
+      # served key cannot drift from the checked one. The published web image
+      # is public and built without a key; this is the only way one arrives.
+      API_KEY: ${API_KEY:-}
     ports:
       - "80:80"
       - "443:443"

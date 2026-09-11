@@ -78,6 +78,26 @@
 		-Server
 	}
 
+	# Runtime configuration (D36). The published web image is public and so
+	# carries no API key; this renders config.js.template -- copied over
+	# /srv/config.js by frontend/Dockerfile -- from the web container's own
+	# API_KEY on each request, which is how the browser gets one. A plain path
+	# matcher is exact, so it cannot swallow any other URL.
+	#
+	# `mime` is required: the templates handler renders only HTML and plain
+	# text by default, and without it the placeholder is served literally.
+	# no-store because the value is per-deployment state, not an asset:
+	# rotating API_KEY must take effect on the next load, not after a cache
+	# expiry.
+	handle /config.js {
+		root * /srv
+		header Cache-Control "no-store"
+		templates {
+			mime text/javascript application/javascript
+		}
+		file_server
+	}
+
 	# The client-side routes, mirrored from frontend/src/lib/routes.ts.
 	#
 	# This list is duplicated knowingly: Caddy cannot import TypeScript. It is

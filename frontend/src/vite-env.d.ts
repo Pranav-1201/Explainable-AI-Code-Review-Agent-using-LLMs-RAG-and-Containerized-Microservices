@@ -18,3 +18,17 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+/**
+ * Set by /config.js before the bundle loads (D36). A deployed web container
+ * renders it from its own API_KEY; the static default in public/config.js
+ * sets no key.
+ */
+interface AcraRuntimeConfig {
+  /** The server's API_KEY. Empty or absent in local development. */
+  readonly apiKey?: string;
+}
+
+interface Window {
+  __ACRA_CONFIG__?: AcraRuntimeConfig;
+}

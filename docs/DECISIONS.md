@@ -1020,3 +1020,47 @@ Recorded so the next session does not rediscover them as new:
   whatever `REDIS_URL` points at. Harmless in CI's isolated database; would
   wipe real limiter buckets for a developer running the suite against a live
   stack.
+
+## D36 — The browser gets the API key at runtime, not at build time
+
+**Date:** 2026-09-10 · **Decided by:** Pranav, choosing among options proposed by Claude Opus 5 (session `655d7eab`)
+
+Phase F's runbook made `API_KEY` mandatory on a public host and pulled the
+published web image — which `release.yml` deliberately builds without
+`VITE_API_KEY`, because a published image is public and a key baked into one
+is a published key. Each half was right; together they meant every protected
+call from the UI would 401. `deploy-stack` booted with `API_KEY` unset, so CI
+never saw it.
+
+**Chosen: `/config.js`, rendered by Caddy's `templates` handler from the web
+container's own `API_KEY`** (the same `.env` line the api reads), loaded before
+the bundle and read by `api.ts` at call time, with `VITE_API_KEY` kept as a
+local-development fallback. The published image stays generic, rollback by sha
+tag keeps working for both tiers, and rotating the key is a restart.
+
+**Rejected:**
+- *Build the web image on the host* — no code change, but the web tier's
+  rollback becomes a rebuild at an old sha instead of a tag pull, which is what
+  Phase M's rollback criterion exists to avoid.
+- *A private image with the key baked in* — every historical sha tag would
+  carry whichever key was current, so rotation could never un-publish an old
+  one.
+- *Caddy injects `X-API-Key` on proxied requests* — every request through the
+  edge would carry the key with no extra step, so even a drive-by scanner that
+  never loads the page could reach `/scan`. D36 differs from this by exactly one
+  request: a caller must fetch `/config.js` first. That stops callers that never
+  load the page, and nothing more (see below).
+
+**What the key protects on a public deploy — challenged before merge.** A
+pre-merge review (session `655d7eab`) pointed out that `/config.js` serves the
+key to anyone who requests it, so with a public browser UI and no login
+`API_KEY` is **not an access control**: it filters only callers that never load
+the page, and `/health` reporting `"auth": "enabled"` means a key is
+*required*, not that it is secret. What actually bounds abuse of `/scan` is the
+per-IP rate limit, the git-host allowlist, repository-URL validation and the
+disk ceilings. That was already the design since Phase A — the frontend always
+held a key readable by anyone who loads the page (`api.ts`, and the old
+"rebuild with `VITE_API_KEY`" step) — and the key was only secret in the
+published images because that deploy did not work. Pranav accepted D36 on
+those terms on 2026-09-11 rather than keep the UI off the public host. Real
+per-user auth remains roadmap item G.
