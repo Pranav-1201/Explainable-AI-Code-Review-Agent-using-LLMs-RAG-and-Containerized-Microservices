@@ -64,6 +64,13 @@ jobs:
         id: sha
         run: echo "value=${{ github.event.workflow_run.head_sha || github.sha }}" >> "$GITHUB_OUTPUT"
 
+      - name: Set up QEMU
+        # arm64 images for the free Oracle A1 host (Phase M). Emulation is paid
+        # only where the cache misses: cache-from below reads the NATIVE arm64
+        # layers ci.yml's deploy-stack matrix built for this same commit, and
+        # the web image's npm/Vite stage runs on the build platform regardless.
+        uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -83,10 +90,14 @@ jobs:
           tags: |
             ${{ steps.img.outputs.name }}:${{ steps.sha.outputs.value }}
             ${{ steps.img.outputs.name }}:latest
-          # The torch/transformers layer is multi-GB and identical across
-          # code-only changes; without a cache every push re-downloads it.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+          # Read the native per-architecture caches ci.yml's deploy-stack wrote
+          # for this commit (CI always completes before this workflow runs).
+          # No cache-to: CI owns those scopes, and a third copy here would only
+          # push them out of the repository's cache quota sooner.
+          cache-from: |
+            type=gha,scope=api-X64
+            type=gha,scope=api-ARM64
 
       - name: Build and push the web image
         # The frontend bundle and the API are versioned together and can
@@ -111,9 +122,11 @@ jobs:
           # correct state until a domain exists — canonical links, og:url and
           # sitemap.xml all omit themselves rather than pointing somewhere wrong.
           #
-          # VITE_API_KEY is deliberately absent. Vite inlines these values into
-          # the bundle and a published image is a public artifact, so passing a
-          # key here would publish the key. A deployment that wants one builds
-          # the web image on the host; DEPLOYMENT.md says how.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # VITE_API_KEY is deliberately absent, and frontend/Dockerfile no
+          # longer accepts it: a published image is public, so a key baked in
+          # would be a published key. The browser gets the key at runtime from
+          # /config.js, rendered from the host's API_KEY (D36).
+          platforms: linux/amd64,linux/arm64
+          cache-from: |
+            type=gha,scope=web-X64
+            type=gha,scope=web-ARM64

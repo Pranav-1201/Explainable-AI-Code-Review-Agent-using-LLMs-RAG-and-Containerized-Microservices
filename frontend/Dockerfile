@@ -10,7 +10,11 @@
 # Node 20 to match .github/workflows/ci.yml, which is the only version this
 # frontend has evidence of building under. The dev machine has 22; that is not
 # a reason to build the shipped artifact with it.
-FROM node:20-alpine AS build
+# $BUILDPLATFORM, not the target: the bundle is plain JavaScript and identical
+# on every architecture, so npm and Vite run natively on the build machine even
+# while release.yml produces the arm64 image under QEMU. Only the caddy stage
+# below is built per platform.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS build
 
 WORKDIR /app
 
