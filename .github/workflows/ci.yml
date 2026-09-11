@@ -195,9 +195,19 @@ jobs:
           retention-days: 7
 
   deploy-stack:
-    name: Deploy stack (build images + boot)
-    runs-on: ubuntu-latest
+    name: Deploy stack (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
+    strategy:
+      # Both architectures report even when one fails: an arm64-only break is
+      # exactly the signal this matrix exists to produce, and fail-fast would
+      # cancel it as collateral.
+      fail-fast: false
+      matrix:
+        # ubuntu-24.04-arm because the free Oracle A1 host is ARM (Phase M).
+        # The arm64 stack is built AND booted here, natively, before anything
+        # merges -- otherwise the VM would be the first place it ever ran.
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
     env:
       # Phase M (D36): boot the way production must run -- with auth ON. This
       # job booted with API_KEY unset until now, so it never exercised the path
@@ -229,8 +239,10 @@ jobs:
           push: false
           load: true
           tags: local/acra:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # One scope per architecture, and named so release.yml can read the
+          # native layers these builds produce for the same commit.
+          cache-from: type=gha,scope=api-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=api-${{ runner.arch }}
 
       - name: Build the web image
         # Context is the repo root, not frontend/, because the Caddyfile lives
@@ -244,8 +256,8 @@ jobs:
           tags: local/acra-web:ci
           build-args: |
             VITE_API_BASE=/api
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=web-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=web-${{ runner.arch }}
 
       - name: Validate the merged compose configuration
         # Renders the base file and the overlay together, resolving variables
