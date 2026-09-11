@@ -4,9 +4,41 @@
 short as *"finish my project"*, this file is the whole brief. Read it, then
 `docs/CONSTRAINTS.md`, then start at the next unfinished phase below.
 
-**Last updated:** 2026-09-09 · **Updated by:** Claude Opus 5 session
-`500a0fca` · **Branch at handover:** `main`, clean and level with
+**Last updated:** 2026-09-11 · **Updated by:** Claude Opus 5 session
+`655d7eab` · **Branch at handover:** `main`, clean and level with
 `origin/main`.
+
+**PHASE M CODE IS MERGED AND PUBLISHED; the live deploy is in progress.**
+`main` = `origin/main` = **`8e7c614`** ("Merge Phase M: serve the API key at
+runtime and publish arm64 images"). **CI GREEN on the merge commit on both
+architectures** (run `34585300607`: backend, frontend, and deploy-stack on
+`ubuntu-latest` and `ubuntu-24.04-arm`), and the release (run `34585515405`)
+published both images for **`linux/amd64` and `linux/arm64`** under that sha —
+checked against GHCR's manifests, not assumed. Branch
+`phase-m/runtime-config-arm64` deleted local and remote. Spec
+`docs/superpowers/specs/2026-09-10-phase-m-deploy-design.md`, plan
+`docs/superpowers/plans/2026-09-11-phase-m-deploy.md`, decision D36.
+
+What changed: the browser now gets the API key at runtime from `/config.js`,
+which Caddy renders from the web container's `API_KEY`. Published images carry
+no key, so the old documented deploy answered every scan from the UI with 401.
+`deploy-stack` now boots with auth on and runs on arm64 as well as amd64; the
+release publishes both architectures; `DEPLOYMENT.md` has the $0 runbook
+(Oracle Always Free A1 behind a DuckDNS name).
+
+**Read D36 before touching auth.** A pre-merge review established that on a
+public host with the browser UI, `API_KEY` is **not an access control** —
+`/config.js` serves it to anyone. Abuse of `/scan` is bounded by the per-IP rate
+limit, the git-host allowlist, repository-URL validation and the disk ceilings.
+Pranav accepted that on 2026-09-11 rather than keep the UI off the public host.
+
+**What is left of M — Task 8 of the plan.** Pranav has provisioned the Oracle
+A1 host and its DuckDNS name. Remaining: configure and start it, the
+acceptance checks (`/api/health` 200 with `"auth": "enabled"`, `/config.js`
+carries the key, port 8000 unreachable, one real scan through the UI), and the
+rollback drill between `8e7c614` and the sha of this handover commit. **Only
+shas at or after `8e7c614` carry arm64**; anything older will not pull on that
+host.
 
 **S10 IS MERGED AND SHIPPED.** `main` = `origin/main` = **`c396f02`**
 ("Merge S10: share the rate-limit window across API replicas"), **CI GREEN on
@@ -18,7 +50,7 @@ of them meant the feature did nothing at all via its documented path.
 
 B1 is complete (1c); phases L and K are complete and F1 is complete (1a–1b).
 **The unassigned backlog is empty.** The only thing left in the roadmap is
-**M — deploy**.
+**M — deploy**, whose code is merged; only the live deploy remains (above).
 
 > **Read this before touching CI on a new branch.** `s10/redis-rate-limiting`
 > got **no CI run at all** when it was pushed, silently. `ci.yml` triggers on
@@ -587,7 +619,7 @@ Full detail, including acceptance criteria and idea IDs, is in
 | ~~**J**~~ | Explanation UX — **COMPLETE and merged**. J1 (F7, F8, F9-detail, F15), J2 (F6, F9, `snippet`, F16) at `568bf4e`; **J3 (F4, F5) merged 2026-08-25 at `2004639`**, CI green | — |
 | ~~**K**~~ | ~~Language contract — B6, F10~~ — **DONE 2026-09-04**, section 1b | — |
 | ~~**L**~~ | ~~Dead-code wiring (S8), fixture exclusion (S9), bundle split (F11), F12-F14, H1-H2~~ — **DONE 2026-09-04**, section 1a | — |
-| **M** | Deploy | now unblocked |
+| **M** | Deploy — **code merged `8e7c614` 2026-09-11**, images multi-arch; live deploy + rollback drill pending (plan Task 8) | — |
 
 **Not claimed by any phase in the audit's plan table.** These fall out of the
 roadmap entirely and will be missed if nobody looks for them:
@@ -603,13 +635,15 @@ roadmap entirely and will be missed if nobody looks for them:
 | ~~F3~~ | ~~Sort the file list~~ | | DONE `2f8a077` |
 
 **S10 is done (section 1d) and B1 is done (section 1c). The unassigned
-backlog is empty.** What remains is **M** (deploy), which nothing blocks but
-which is outward-facing and needs an explicit go-ahead.
+backlog is empty.** What remains of **M** is the live deploy on Pranav's host
+and the drilled rollback — plan Task 8, `docs/superpowers/plans/2026-09-11-phase-m-deploy.md`.
 
 ### Known open, none of them blocking
 
 | Item | Where | Note |
 |---|---|---|
+| Whitespace around `API_KEY` 401s the live-progress stream | `frontend/src/lib/api.ts`, `backend/app/api_guard.py` | `api_key_ok` compares the raw `?api_key=` value against the stripped configured key; `fetch` trims header values, so only the SSE stream fails, and `api.ts` then falls back to polling. Found by the Phase M review; the fix (trim in `resolveApiKey`) was deliberately not applied, Pranav's call on 2026-09-11. Use a key with no whitespace, e.g. `openssl rand -hex 32`. |
+| `ROLLBACK.md` Level 4 re-check curls `/health` | `docs/ROLLBACK.md` | `/health` is in the Caddyfile's `@spa` list, so behind Caddy it returns the app's Health **page** (200, HTML, no `auth` field); the API's health is `/api/health`. Also, a "known-good sha" must be `8e7c614` or later, or the web tier has no `/config.js` and the UI 401s. Found during the Phase M review; not yet fixed, by Pranav's choice. |
 | `generate_improved_code` is a dead switch | `settings_manager.py` | stored and rendered in Settings, read by nothing; the transforms run unconditionally. Changing it alters scan behaviour — its own change. See `DECISIONS.md` D16-area note. |
 | `WhatChangedPane`'s `return null` is unreachable | `frontend/src/components/WhatChangedPane.tsx` | found by J3 review, recorded, judged not worth a change on its own. |
 | "Cannot reach backend … (Failed to fetch)" | `frontend/src/lib/api.ts` `startScan` | **NOT reproduced** on 2026-08-26 across four repos in a real browser. Leading unproven candidate: `API_BASE` is `http://localhost:8000` while uvicorn binds `127.0.0.1` only, so a browser resolving `localhost` → `::1` gets a refusal with exactly that wording. `DECISIONS.md` D18. Needs the failure captured on the machine that shows it — do not "fix" it blind. |
