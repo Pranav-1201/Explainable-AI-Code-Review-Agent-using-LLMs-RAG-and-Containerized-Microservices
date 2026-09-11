@@ -12,7 +12,21 @@ export const API_BASE = (import.meta.env.VITE_API_BASE ?? "http://localhost:8000
 // per-user secret. Real multi-user auth needs a login + short-lived token flow
 // — roadmap item G. Leave VITE_API_KEY unset for local dev, where the backend
 // also leaves API_KEY unset and the API is open.
-const API_KEY = import.meta.env.VITE_API_KEY ?? "";
+//
+// Resolved at CALL time, from two sources in order (D36):
+//   1. window.__ACRA_CONFIG__.apiKey, set by /config.js. A deployed web
+//      container renders that file from its own API_KEY on each request
+//      (config.js.template + Caddy templates). This is how a published image,
+//      which is public and so can never carry a key, still sends one.
+//   2. import.meta.env.VITE_API_KEY, inlined at build time. Local development
+//      only: the static default public/config.js sets no key.
+// Call time rather than module load mirrors api_guard's env-at-call-time rule,
+// and is what lets tests change the key without re-importing this module.
+export function resolveApiKey(): string {
+  const runtime = window.__ACRA_CONFIG__?.apiKey;
+  if (typeof runtime === "string" && runtime !== "") return runtime;
+  return import.meta.env.VITE_API_KEY ?? "";
+}
 
 const SCAN_TIMEOUT_MS = 5 * 60 * 1000; // total scan deadline
 const POLL_REQUEST_TIMEOUT_MS = 15_000;  // per-request timeout (15s)
@@ -20,21 +34,24 @@ const POLL_REQUEST_TIMEOUT_MS = 15_000;  // per-request timeout (15s)
 // Every request goes through this so a newly added call cannot forget the key.
 function apiHeaders(extra?: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = { ...(extra ?? {}) };
-  if (API_KEY) headers["X-API-Key"] = API_KEY;
+  const key = resolveApiKey();
+  if (key) headers["X-API-Key"] = key;
   return headers;
 }
 
 // EventSource cannot set headers, so the stream URL carries the key in the
 // query string — the one place the backend accepts it (api_guard.is_stream_path).
-function streamUrl(scanId: string): string {
+// Exported for the tests in api.test.ts; not part of the page-facing API.
+export function streamUrl(scanId: string): string {
   const base = `${API_BASE}/scan/${encodeURIComponent(scanId)}/stream`;
-  return API_KEY ? `${base}?api_key=${encodeURIComponent(API_KEY)}` : base;
+  const key = resolveApiKey();
+  return key ? `${base}?api_key=${encodeURIComponent(key)}` : base;
 }
 
 // Helper: extract a readable error from a failed response
 async function extractErrorMessage(response: Response): Promise<string> {
   if (response.status === 401) {
-    return "Unauthorized — the backend requires an API key (set VITE_API_KEY).";
+    return "Unauthorized — this page sent no valid API key. On a server, API_KEY must reach the web container (DEPLOYMENT.md).";
   }
   if (response.status === 429) {
     const retry = response.headers.get("Retry-After");
