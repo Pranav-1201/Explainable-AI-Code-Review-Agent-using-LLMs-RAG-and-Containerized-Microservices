@@ -1045,10 +1045,22 @@ tag keeps working for both tiers, and rotating the key is a restart.
 - *A private image with the key baked in* — every historical sha tag would
   carry whichever key was current, so rotation could never un-publish an old
   one.
-- *Caddy injects `X-API-Key` on proxied requests* — the edge would let anyone
-  through, including a plain `curl`: auth switched off in all but name
-  (CONSTRAINTS #5).
+- *Caddy injects `X-API-Key` on proxied requests* — every request through the
+  edge would carry the key with no extra step, so even a drive-by scanner that
+  never loads the page could reach `/scan`. D36 differs from this by exactly one
+  request: a caller must fetch `/config.js` first. That stops callers that never
+  load the page, and nothing more (see below).
 
-**What this does not change:** the key is readable by anyone who loads the
-page, exactly as the inlined value was. It raises the cost of drive-by abuse of
-`/scan`; it does not identify callers. Real auth remains roadmap item G.
+**What the key protects on a public deploy — challenged before merge.** A
+pre-merge review (session `655d7eab`) pointed out that `/config.js` serves the
+key to anyone who requests it, so with a public browser UI and no login
+`API_KEY` is **not an access control**: it filters only callers that never load
+the page, and `/health` reporting `"auth": "enabled"` means a key is
+*required*, not that it is secret. What actually bounds abuse of `/scan` is the
+per-IP rate limit, the git-host allowlist, repository-URL validation and the
+disk ceilings. That was already the design since Phase A — the frontend always
+held a key readable by anyone who loads the page (`api.ts`, and the old
+"rebuild with `VITE_API_KEY`" step) — and the key was only secret in the
+published images because that deploy did not work. Pranav accepted D36 on
+those terms on 2026-09-11 rather than keep the UI off the public host. Real
+per-user auth remains roadmap item G.

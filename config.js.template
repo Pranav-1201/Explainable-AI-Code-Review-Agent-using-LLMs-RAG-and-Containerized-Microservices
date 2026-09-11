@@ -11,8 +11,13 @@
  * Replaces frontend/public/config.js (the key-less local default) in the web
  * image's final stage, and never runs un-rendered anywhere.
  *
- * Readable by anyone who loads the page, exactly as the inlined key was
- * before: it raises the cost of drive-by abuse of /scan, it does not identify
- * callers. See frontend/src/lib/api.ts.
+ * Keep the placeholder inside this double-quoted string. `| js` is escaping
+ * for a quoted JavaScript string; it is not documented as safe anywhere else,
+ * such as inside a template literal. Use a printable-ASCII key
+ * (`openssl rand -hex 32`).
+ *
+ * Served to anyone who requests /config.js. On a public host the key filters
+ * only callers that never load the page; it is not an access control, and it
+ * does not identify callers (DECISIONS.md D36).
  */
 window.__ACRA_CONFIG__ = { apiKey: "{{env "API_KEY" | js}}" };

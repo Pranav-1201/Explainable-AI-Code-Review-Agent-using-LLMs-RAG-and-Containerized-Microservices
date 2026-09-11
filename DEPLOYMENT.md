@@ -86,7 +86,9 @@ Confirm each of these yourself. None of them is asserted by this repository.
       shows `api` **healthy**, and `web`, `worker`, `redis`, `backup` running.
 - [ ] `curl -fsS https://<host>/api/health` returns JSON containing
       `"auth": "enabled"`. **If it says `disabled`, stop** — `API_KEY` did not
-      reach the container, and the deployment is open.
+      reach the container, and the deployment is open. `enabled` means a key
+      is *required*, not that it is secret — the UI gets it from `/config.js`
+      (DECISIONS.md D36).
 - [ ] `curl -fsS https://<host>/config.js` contains your key, and a scan
       started from the UI does not fail with "Unauthorized".
 - [ ] The app loads at `https://<host>/`.
@@ -477,10 +479,13 @@ GHCR rejects uppercase paths and this repository's owner has capitals.
   closed (which would turn a broker hiccup into a total outage). It logs one
   warning per outage and stops retrying for 30s, so a dead Redis does not add
   a connect timeout to every request. See DECISIONS.md D34.
-- **The API key is a single shared secret**, not per-user auth, and the frontend
-  copy ships inside a public static bundle. It raises the cost of drive-by abuse
-  of `/scan`; it does not identify or isolate callers. A login + short-lived
-  token flow is the real answer if this ever serves more than its owner.
+- **The API key is a single shared value, not per-user auth**, and the web
+  container serves it to every visitor through `/config.js` (D36). On a public
+  host it therefore filters only callers that never load the page; what bounds
+  abuse of `/scan` is the per-IP rate limit, the git-host allowlist, repository
+  URL validation and the disk ceilings. It does not identify or isolate
+  callers. A login + short-lived token flow is the real answer if this ever
+  serves more than its owner.
 - **Disk ceilings bound the caches, not the whole host.** Phase E added LRU
   eviction across both caches (`MAX_CACHE_MB`) and a clone-size watchdog
   (`MAX_REPO_MB`); see "Operations (Phase E) → Disk ceilings" below for the
