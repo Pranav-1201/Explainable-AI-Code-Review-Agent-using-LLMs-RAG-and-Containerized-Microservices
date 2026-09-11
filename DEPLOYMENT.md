@@ -178,6 +178,143 @@ To harden HSTS after the domain has been stable on HTTPS for a while, add
 `Strict-Transport-Security` value in the `Caddyfile`. Both are close to one-way
 doors, which is why neither ships by default.
 
+## Free deploy — Oracle Always Free A1 + DuckDNS
+
+The $0 path: the same compose stack as the section above, on an ARM host,
+behind a free DuckDNS hostname. Anything that describes a provider console is
+**check the console — labels change**; the figures are from Oracle's Always
+Free page as read on 2026-09-10.
+
+### What it costs and what it assumes
+
+- **$0.** Oracle requires a card at signup. Secondary sources report a $1
+  authorisation that is not charged; Oracle's Always Free page itself does not
+  say.
+- **The home region is chosen once and is permanent.** A1 capacity varies by
+  region, and "out of capacity" when creating an A1 instance is commonly
+  reported — if you hit it, retry later.
+- **Only images published after Phase M carry `linux/arm64`.** Every earlier
+  sha is amd64-only and will not pull on this host.
+
+### 1. Create the instance
+
+- Image: Canonical Ubuntu 24.04 (aarch64).
+- Shape: `VM.Standard.A1.Flex`, within the Always Free allowance of
+  **2 OCPUs / 12 GB total**.
+- Boot volume: the default is fine; Always Free covers **200 GB** of boot and
+  block storage combined.
+- Networking: assign a public IPv4 address, and add your SSH public key.
+
+### 2. Open ports 80 and 443 — in two places
+
+Both are required. Caddy's certificate challenge arrives on port 80, and
+either layer on its own still blocks it.
+
+1. **VCN security list** (console): add ingress rules for TCP 80 and TCP 443
+   from `0.0.0.0/0`.
+2. **Host firewall** (on the instance):
+
+   ```bash
+   sudo iptables -L INPUT -n --line-numbers
+   ```
+
+   If a `REJECT` rule is listed, insert ACCEPT rules **above** it, using that
+   rule's line number as `<n>`, then persist them:
+
+   ```bash
+   sudo iptables -I INPUT <n> -p tcp --dport 80 -m state --state NEW -j ACCEPT
+   sudo iptables -I INPUT <n> -p tcp --dport 443 -m state --state NEW -j ACCEPT
+   sudo netfilter-persistent save
+   ```
+
+### 3. Install Docker
+
+```bash
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+```
+
+Log out and back in, then check `docker compose version` reports **v2.24 or
+newer** — the production overlay uses `!reset`, which older versions reject.
+
+### 4. Point a DuckDNS name at it
+
+Create `<name>.duckdns.org` at duckdns.org and set its IP to the instance's
+public IPv4. Confirm it resolves **before** starting the stack:
+
+```bash
+getent hosts <name>.duckdns.org
+```
+
+It must print the instance's public IP. A wrong IP makes Caddy's first
+certificate attempt fail, and failed attempts count against Let's Encrypt's
+rate limit. `duckdns.org` is on the Public Suffix List, so each DuckDNS
+subdomain has a rate-limit bucket of its own rather than sharing one with every
+other DuckDNS user.
+
+### 5. Configure
+
+```bash
+git clone https://github.com/Pranav-1201/AI-Code-Review-Agent.git
+cd AI-Code-Review-Agent
+cp .env.example .env
+sudo mkdir -p /var/lib/acra-backups
+```
+
+Set these in `.env`:
+
+| Variable | Value |
+|---|---|
+| `API_KEY` | the output of `openssl rand -hex 32` |
+| `SITE_ADDRESS` | `<name>.duckdns.org` |
+| `BACKUP_HOST_DIR` | `/var/lib/acra-backups` |
+| `IMAGE_TAG` | a published multi-arch sha. Pin one rather than using `latest`, so the running version is always known and a rollback is a one-line change. |
+
+Check that a sha carries arm64 before using it — `arm64` must appear among
+the architectures listed:
+
+```bash
+docker manifest inspect ghcr.io/pranav-1201/ai-code-review-agent:<sha> | grep architecture
+```
+
+### 6. Start and verify
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+Then work through the verification checklist in the section above — including
+the `/config.js` item — against `https://<name>.duckdns.org`.
+
+### 7. Optional: canonical URLs
+
+Set the repository variable `SITE_URL` to `https://<name>.duckdns.org`
+(Settings, then Secrets and variables, then Actions, then Variables). The next
+published web image bakes it into `sitemap.xml`, canonical links and `og:url`.
+
+### 8. Drill the rollback
+
+Note the running sha, then roll back to an **older multi-arch** sha:
+
+```bash
+IMAGE_TAG=<older-sha> docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+IMAGE_TAG=<older-sha> docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+curl -fsS https://<name>.duckdns.org/api/health
+```
+
+The health check must return 200 with `"auth":"enabled"`. Then return to the
+newer sha the same way. An amd64-only sha fails to pull here with
+`no matching manifest for linux/arm64` — that is the expected error, not a
+broken deploy.
+
+### 9. Known risk: idle reclamation
+
+Oracle may reclaim an Always Free instance that, over 7 days, has CPU p95
+below 20%, network below 20%, and — on A1 only — memory below 20% (Oracle's
+Always Free page). A low-traffic demo can meet all three. Nothing here
+engineers around it: watch utilisation for the first week (`free -m`, `top`),
+and copy the backup directory off the host from time to time.
+
 ## Verification checklist — please confirm on your Docker-capable machine
 
 > Status: the **in-process (eager)** path and a **real out-of-process broker
