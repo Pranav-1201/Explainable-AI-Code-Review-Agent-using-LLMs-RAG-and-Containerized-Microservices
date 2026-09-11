@@ -432,16 +432,25 @@ jobs:
             console.log("config.js apiKey matches API_KEY byte-for-byte");
           '
 
-          echo "--- the key is never inlined into a bundle chunk ---"
-          # NEEDLE is passed explicitly: before the runtime-config change the
-          # web container has no API_KEY of its own, and an empty pattern would
-          # match every file.
-          if docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T -e NEEDLE="$API_KEY" web \
-               sh -c 'grep -rlF -- "$NEEDLE" /srv/assets'; then
-            echo "FAIL: the API key is baked into a bundle chunk" >&2
-            exit 1
-          fi
-          echo "no bundle chunk contains the key"
+          echo "--- the key is never baked into a served file ---"
+          # grep's exit code decides this, and only 1 passes: 0 means the key
+          # was found, and anything else -- a missing path, or `exec` failing
+          # because web is down -- means the search never ran, which must not
+          # read as green. All of /srv, not just /srv/assets, so index.html and
+          # 404.html are covered. /srv/config.js cannot match: it holds the
+          # un-rendered template, and the key exists only in the response.
+          # NEEDLE is passed explicitly so an empty web-side API_KEY can never
+          # become an empty pattern that matches every file.
+          set +e
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T -e NEEDLE="$API_KEY" web \
+            sh -c 'grep -rlF -- "$NEEDLE" /srv'
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "no served file contains the key" ;;
+            0) echo "FAIL: the API key is baked into the served files listed above" >&2; exit 1 ;;
+            *) echo "FAIL: could not search /srv (exit $rc), so this check proved nothing" >&2; exit 1 ;;
+          esac
 
       - name: Confirm the API port is NOT published
         # The overlay resets it. If this regresses, an unauthenticated API is
